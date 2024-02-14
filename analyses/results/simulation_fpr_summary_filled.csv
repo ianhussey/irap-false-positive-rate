@@ -1,0 +1,19 @@
+simulation,anova_follow_up_tests,difference_from_zero_tests,data_processing,covariate,combined_analyses,notes
+1,No,No,No,No,-,This is the baseline analysis: a 4 (trial type) X 2 (group) within-between Repeated Measues ANOVA. Inflated False-Positive Rate is due solely to mANOVA's hidden multiplicity.
+2,Yes,No,No,No,-,Failure to correct for multiple comparisons in follow-up tests inflates the baseline analysis further.
+3,Yes,Yes,No,No,-,"Analysis 1 produces 3 p values. Analysis 2 produces 7. Here, analysis 3 produces 15 and FPR rises accordingly."
+4,No,No,Yes (2 scores),No,-,NA
+5,Yes,No,Yes (2 scores),No,-,NA
+6,Yes,Yes,Yes (2 scores),No,-,NA
+7,No (but already tested by ANOVA),No,Yes (1 score),No,-,"Calculating and using just an overall D score effectively controls the false-positive rate, but undermines a key supposed advantage of the IRAP (i.e., consideration of separate relational responses)"
+8,Yes,Yes,Yes (1 score),No,-,NA
+9,No,No,No,Yes,-,NA
+10,Yes,No,No,Yes,-,NA
+11,Yes,Yes,No,Yes,-,NA
+12,No,No,Flexible,No,"Best result from 1, 4, 7",NA
+13,Yes,No,Flexible,No,"Best result from 2, 5, 7",NA
+14,Yes,Yes,Flexible,No,"Best result from 3, 6, 8",Common analysis strategy combined with flexibility in data processing produces very high False-Positive Rates.
+15,No,No,No,Flexible,Best result from 1 or 9,NA
+16,Yes,No,No,Flexible,Best result from 2 or 10,NA
+17,Yes,Yes,No,Flexible,Best result from 3 or 11,Common analysis strategy combined with flexibility in whether covariate is added to the model produces very high False-Positive Rates.
+18,Yes,Yes,Flexible,Flexible,"Best result from 3, 6, 8, 11","Common analysis strategy combined with flexibility in data processing OR whether covariate is added to the model produces very high False-Positive Rates. NB flexiblity is in data processing or covariate, not interactive effect of both. Latter's complexity is beyond the scope of this paper."

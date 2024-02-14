@@ -1,0 +1,502 @@
+---
+title: "Simulations of the False Positive Rate in IRAP research"
+author: "Ian Hussey"
+output:
+  html_document:
+    code_folding: hide
+    highlight: haddock
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE)
+```
+
+```{r}
+
+# set random number generator seed value
+set.seed(42)
+
+# dependencies
+library(tidyverse)
+library(MASS)
+library(pbapply)
+library(lme4)
+library(ggeffects)
+
+library(distributional)
+library(ggdist)
+library(beeswarm)
+library(patchwork)
+
+theme_set(theme_ggdist())
+
+# round all numeric columns using traditional rounding
+round_df <- function(x, ndigits = 3) {
+  require(janitor)
+  mutate_if(x, is.numeric, janitor::round_half_up, digits = ndigits)
+}
+
+
+# settings for all simulations
+
+## n iterations per simulation
+n_samples <- 1000
+
+## n participants per study
+## In this case, this is the modal n per study found in our systematic review of all IRAP studies published before 2019.
+n_median_IRAP_study <- 36
+
+```
+
+# What is a simulation study?
+
+## Tests of a true effect
+
+Imagine a large 'true' effect of Cohen's *d* = 1.0. That is, an effect whose value in the population is *d* = 1.0. 
+
+We can generate data for such an effect using a (pseudo)random number generator, generating numbers for two groups (treatment and control) that each follow a normal distribution, with means of 0 and 1, and SDs of 1. I.e., a Cohen's *d* of 1.0. This population distribution is plotted below.
+
+```{r}
+
+# population
+treatment <- rnorm(100000, mean = 1.0, sd = 1)
+control   <- rnorm(100000, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+ggplot(simulated_data, aes(score, group = group, fill = group)) +
+  geom_density(alpha = 0.5, adjust = 1.5) +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Population") +
+  # annotate("text", 
+  #          label = paste("p =", round(t.test(score ~ group, data = simulated_data)$p.value, 3)), 
+  #          x = 0.5, 
+  #          y = 0.06, 
+  #          size = 8) +
+  xlim(-5, 5)
+
+```
+
+Clear differences between the groups are visible in the form non-overlap of the two distribution curves.
+
+Of course, our real world research studies do not use the whole population but rather draw samples of participants from them. Inferential statistics are then used to make inferences about the population parameter values, aka the existence and magnitude of the true effect.
+
+Due to sampling variance, statistical power, etc., the presence of a true effect (i.e., a non-zero effect via a significance test) will only be detected in a proportion of cases. 
+
+Here, I simulate three different samples of 13 participants (in each of the two groups) drawn from the same population. That is, the true population effect is still Cohen's *d* = 1.0. In each 'experiment' a t-test is applied to the simulated data, whose *p*-value is reported in the plot. Because of statistical power, sampling variance, etc., only some of these simulated 'experiments' will detect a significant effect despite the population effect being non-null. Cases where a non-zero population effect is not detected by the statistical inference test therefore represent false-negatives.
+
+```{r}
+
+# sample 1
+treatment <- rnorm(13, mean = 1.0, sd = 1)
+control   <- rnorm(13, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+# ggplot(simulated_data, aes(score, group = group, fill = group)) +
+#   geom_density(alpha = 0.5, adjust = 1.5) +
+#   theme_classic() +
+#   scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+#   ggtitle("Sample 1") +
+#   annotate("text", 
+#            label = p_value_string, 
+#            x = -4, 
+#            y = 0.35, 
+#            size = 5) +
+#   coord_cartesian(ylim = c(0, 0.5)) +
+#   xlim(-5, 5)
+
+ggplot(simulated_data, aes(score, group, group = group, fill = group)) +
+  #geom_density(alpha = 0.5, adjust = 1.5) +
+  stat_dots(position = "dodgejust") +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 1") +
+  annotate("text", 
+           label = p_value_string, 
+           x = 4, 
+           y = 1.35, 
+           size = 5) +
+  #coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5)
+
+# sample 2
+treatment <- rnorm(13, mean = 1.0, sd = 1)
+control   <- rnorm(13, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+# ggplot(simulated_data, aes(score, group = group, fill = group)) +
+#   geom_density(alpha = 0.5, adjust = 1.5) +
+#   theme_classic() +
+#   scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+#   ggtitle("Sample 2") +
+#   annotate("text", 
+#            label = p_value_string, 
+#            x = -4, 
+#            y = 0.35, 
+#            size = 5) +
+#   coord_cartesian(ylim = c(0, 0.5)) +
+#   xlim(-5, 5)
+
+ggplot(simulated_data, aes(score, group, group = group, fill = group)) +
+  #geom_density(alpha = 0.5, adjust = 1.5) +
+  stat_dots(position = "dodgejust") +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 1") +
+  annotate("text", 
+           label = p_value_string, 
+           x = 4, 
+           y = 1.35, 
+           size = 5) +
+  #coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5)
+
+# sample 3
+treatment <- rnorm(13, mean = 1.0, sd = 1)
+control   <- rnorm(13, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+# ggplot(simulated_data, aes(score, group = group, fill = group)) +
+#   geom_density(alpha = 0.5, adjust = 1.5) +
+#   theme_classic() +
+#   scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+#   ggtitle("Sample 3") +
+#   annotate("text", 
+#            label = p_value_string, 
+#            x = -4, 
+#            y = 0.35, 
+#            size = 5) +
+#   coord_cartesian(ylim = c(0, 0.5)) +
+#   xlim(-5, 5) 
+
+ggplot(simulated_data, aes(score, group, group = group, fill = group)) +
+  #geom_density(alpha = 0.5, adjust = 1.5) +
+  stat_dots(position = "dodgejust") +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 1") +
+  annotate("text", 
+           label = p_value_string, 
+           x = 4, 
+           y = 1.35, 
+           size = 5) +
+  #coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5)
+
+```
+
+alt 
+```{r}
+
+# sample 1
+n_per_sample <- 13
+
+treatment1 <- rnorm(n_per_sample, mean = 1.0, sd = 1)
+control1   <- rnorm(n_per_sample, mean = 0.0, sd = 1)
+
+treatment2 <- rnorm(n_per_sample, mean = 1.0, sd = 1)
+control2   <- rnorm(n_per_sample, mean = 0.0, sd = 1)
+
+treatment3 <- rnorm(n_per_sample, mean = 1.0, sd = 1)
+control3   <- rnorm(n_per_sample, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(score  = c(treatment1, treatment2, treatment3, control1, control2, control3),
+             group  = c(rep("Treatment", n_per_sample*3), rep("Control", n_per_sample*3)),
+             sample = c(rep("Sample 1", n_per_sample), rep("Sample 2", n_per_sample), rep("Sample 3", n_per_sample), 
+                        rep("Sample 1", n_per_sample), rep("Sample 2", n_per_sample), rep("Sample 3", n_per_sample)))
+
+p_value1 <- round(t.test(score ~ group, data = simulated_data |> filter(sample == "Sample 1"))$p.value, 3)
+p_value_string1 <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value1))
+
+p_value2 <- round(t.test(score ~ group, data = simulated_data |> filter(sample == "Sample 2"))$p.value, 3)
+p_value_string2 <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value2))
+
+p_value3 <- round(t.test(score ~ group, data = simulated_data |> filter(sample == "Sample 3"))$p.value, 3)
+p_value_string3 <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value3))
+
+# ggplot(simulated_data, aes(score, group = group, fill = group)) +
+#   geom_density(alpha = 0.5, adjust = 1.5) +
+#   theme_classic() +
+#   scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+#   ggtitle("Sample 1") +
+#   annotate("text", 
+#            label = p_value_string, 
+#            x = -4, 
+#            y = 0.35, 
+#            size = 5) +
+#   coord_cartesian(ylim = c(0, 0.5)) +
+#   xlim(-5, 5)
+
+ggplot(simulated_data, aes(score, group, group = group, fill = group)) +
+  #geom_density(alpha = 0.5, adjust = 1.5) +
+  stat_dots(position = "dodgejust") +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  annotate("text", 
+           label = p_value_string, 
+           x = 4, 
+           y = 1.35, 
+           size = 5) +
+  #coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5) +
+  facet_wrap(~ sample)
+
+```
+## Tests of a null effect
+
+Comparably, we could imagine a 'null' effect in the population is Cohen's *d* = 0. 
+
+in this case, we generate data for both treatment and control that follow a normal distribution, with means of 0 and SDs of 1. I.e., a Cohen's *d* of 0. This population distribution is again plotted below.
+
+```{r}
+
+# population
+treatment <- rnorm(100000, mean = 0.0, sd = 1)
+control   <- rnorm(100000, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+ggplot(simulated_data, aes(score, group = group, fill = group)) +
+  geom_density(alpha = 0.5, adjust = 1.5) +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Population") +
+  # annotate("text", 
+  #          label = paste("p =", round(t.test(score ~ group, data = simulated_data)$p.value, 3)), 
+  #          x = 0.5, 
+  #          y = 0.06, 
+  #          size = 8) +
+  xlim(-5, 5)
+
+```
+
+In this case no  differences are noticeable between the groups, as one distribution curve completely overlaps and hides the other. 
+
+Comparable to the true effects, our real world research studies do not use the whole population but rather draw samples of participants from them. Due to sampling variance, a significant effect may be detected in some samples even though the population effect is zero. 
+
+Here, I again simulate three different samples of 13 participants (in each of the two groups) drawn from the same population. That is, the true population effect is now Cohen's *d* = 0. In each 'experiment' a t-test is applied to the simulated data, whose *p*-value is reported in the plot. Despite the population effect being null, some of these simulated 'experiments' nonetheless detect a significant effect. Cases where a null population effect incorrectly returns a significant result on a statistical inference test therefore represent false-positives.
+
+```{r}
+
+# sample 1
+treatment <- rnorm(13, mean = 0.0, sd = 1)
+control   <- rnorm(13, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+ggplot(simulated_data, aes(score, group = group, fill = group)) +
+  geom_density(alpha = 0.5, adjust = 1.5) +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 1") +
+  annotate("text", 
+           label = p_value_string, 
+           x = -4, 
+           y = 0.35, 
+           size = 5) +
+  coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5)
+
+# sample 2
+treatment <- rnorm(13, mean = 0.0, sd = 1)
+control   <- rnorm(13, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+ggplot(simulated_data, aes(score, group = group, fill = group)) +
+  geom_density(alpha = 0.5, adjust = 1.5) +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 2") +
+  annotate("text", 
+           label = p_value_string, 
+           x = -4, 
+           y = 0.35, 
+           size = 5) +
+  coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5)
+
+# sample 3
+treatment <- rnorm(13, mean = 0.0, sd = 1)
+control   <- rnorm(13, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score)
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+ggplot(simulated_data, aes(score, group = group, fill = group)) +
+  geom_density(alpha = 0.5, adjust = 1.5) +
+  theme_classic() +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 3") +
+  annotate("text", 
+           label = p_value_string, 
+           x = -4, 
+           y = 0.35, 
+           size = 5) +
+  coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5) 
+
+```
+
+## Simulating long run False Positive Rates (FPR)
+
+Following the Neyman-Pearson approach to Null Hypothesis Significance Testing (NHST), statistical inferences about population effects are informed by our estimates of long-run error rates. That is, in the long run of repeating the same study over and over, what rate of false-negatives and false-positives is expected? These values inform how we should interpret the results of a given study. That is, the long run probability that it represents a false-positive, false-negative, true-positive, or true-negative, and therefore the status of the true population effect.
+
+Long run probabilities can be simulated using exactly the same method as above of drawing samples from specified probability distributions, applying statistical inference tests to each sample, and counting the proportion of cases where the test produces an incorrect inference (i.e., a false-negative or false-positive). Whereas the above examples generated 3 example samples each, a simulation study in its simplest form generates a much larger number of these (e.g., 10,000) in order to more precisely and reliably estimate long run probabilities. 
+
+Many different long run probability rates could be simulated. These simulations are concerned with false-positive rates (FPR) specifically. False-positives can be costly in scientific research, as they represent situations in which researchers and other stakeholders may incorrectly infer that a population effect is non-zero. For example, they may mistakenly believe that a drug, behavioral intervention, or policy 'works' when it does not; or they may invest additional time and money into exploring when and where it 'works', or otherwise act as if it 'works'.
+
+The false-positive rate heavily influenced by the $a$ value used for a given test. $a$ is typically set to 0.05, so as to create a long-run probability that, assuming the null hypothesis is true, data at least extreme as those observed would be observed in less than in $a$ proportion of cases. This is the definition of a p-value. p-values less than this value (typically < .05) are frequently referred to as "statistically significant". 
+
+We can simulate this long-run probability of p-values under the null hypothesis by drawing from a population effect where the mean in both the treatment and control group is 0, and the SD of both is 1. This time, a much larger number of samples is drawn, i.e., 1000 of them. Again, a t-test is applied to each sample. The proportion of cases in which a significant result is obtained despite a population effect of 0 equals the false-positive rate. With an $a$ rate of 0.05, the false-positive rather should be 0.05 by definition.
+
+```{r}
+
+# simulation
+sim_0 <- function(n_participants){
+  
+  require(tidyverse)
+  require(pbapply)
+  
+  # generate data
+  treatment <- rnorm(n_participants, mean = 0.0, sd = 1)
+  control   <- rnorm(n_participants, mean = 0.0, sd = 1)
+  
+  simulated_data <- 
+    data.frame(treatment = treatment,
+               control   = control) |>
+    gather(group, score)
+  
+  # run analysis
+  alpha <- 0.05
+  p_value <- t.test(score ~ group, simulated_data, conf.level = (1 - alpha))$p.value
+  
+  # test if p value is lower than alpha value. if so, significant = TRUE.
+  significant <- p_value < alpha
+  return(significant)
+}
+
+# estimate of power. because true effect size is 0, power here refers to false positive rate.
+sim_0 <- 
+  pbreplicate(n_samples, sim_0(n_participants = 1000)) |>
+  mean() |>
+  round(2)
+
+```
+
+- Long run FPR for this t-test = `r sim_0`. 
+- This should equal the alpha value (0.05). 
+
+However, there are many reasons why the long run false-positive rate rises considerably higher than the alpha. These include simply running multiple significance tests. Running multiple independent tests means that the long run probability that at least one of these tests produces a significant result (i.e., a "family-wise" false positive rate) of $1-(1-a)^k$, where $k$ is the number of tests run. As such, with $a$ = 0.05, two tests means a false-positive rate of around 0.10; three tests means a rate of around 0.14, etc.
+
+These simulations are concerns with ways in which the family-wise false-positive rate in IRAP research often rises above the $a$ value in a way that is not always known to the researcher and/or not made explicit to the reader. As such, the false-positive rate may be greatly inflated in the IRAP literature, and therefore the severity of any given test result (i.e., its diagnosticity of a non-null population parameter) is reduced.
+
+# dev
+
+```{r}
+
+set.seed(1234)
+x = rnorm(100)
+
+dat <- expand.grid(
+  x = x,
+  side = "topright",
+  stringsAsFactors = FALSE
+) 
+
+ggplot(dat, aes(x = x)) +
+  stat_dotsinterval(layout = "bin", side = "topright") +
+  labs(
+    x = NULL,
+    y = NULL
+  )
+
+```
+
+
+```{r}
+
+# sample 1
+treatment <- rnorm(50, mean = 0.2, sd = 1)
+control   <- rnorm(50, mean = 0.0, sd = 1)
+
+simulated_data <- 
+  data.frame(treatment = treatment,
+             control   = control) |>
+  gather(group, score) |>
+  mutate(side = case_when(group == "treatment" ~ "bottomleft",
+                          group == "control" ~ "topright"))
+
+p_value <- round(t.test(score ~ group, data = simulated_data)$p.value, 3)
+p_value_string <- ifelse(p_value == 0, "p < 0.001", paste("p =", p_value))
+
+ggplot(simulated_data, aes(score, side = side, fill = group, color = group)) +
+  geom_hline(yintercept = 0, linetype = "solid") +
+  geom_dots(layout = "swarm") +
+  scale_fill_viridis_d(begin = 0.3, end = 0.7) +
+  scale_color_viridis_d(begin = 0.3, end = 0.7) +
+  ggtitle("Sample 1") +
+  annotate("text", 
+           label = p_value_string, 
+           x = -4, 
+           y = 0.35, 
+           size = 5) +
+  #coord_cartesian(ylim = c(0, 0.5)) +
+  xlim(-5, 5) +
+  labs(y = NULL) +
+  theme_classic()
+
+```
+
+
+

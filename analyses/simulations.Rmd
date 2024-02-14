@@ -1,0 +1,1102 @@
+---
+title: "Simulating the False Positive Rate due to common practices in the analysis of IRAP research"
+author: "Ian Hussey"
+output:
+  html_document:
+    code_folding: hide
+    highlight: haddock
+    theme: flatly
+    toc: yes
+    toc_float: yes
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(message = FALSE,
+                      warning = FALSE)
+```
+
+```{r}
+
+# set random number generator seed value
+set.seed(42)
+
+n_iterations <- 1000
+
+# dependencies
+library(tidyverse)
+library(furrr)
+library(broom)
+library(ez)
+library(knitr)
+library(kableExtra)
+library(lme4)
+library(ggeffects)
+library(readxl)
+library(janitor)
+library(ggstance)
+
+# set up parallel processing
+future::plan(multisession, workers = 8)
+
+# round all numeric columns using traditional rounding
+round_df <- function(x, ndigits = 3) {
+  require(janitor)
+  mutate_if(x, is.numeric, janitor::round_half_up, digits = ndigits)
+}
+
+```
+
+# Functions
+
+## Data generation
+
+Following a 4 (within: trial-type) X 2 (between: condition) X 2 (between: block-order) factorial design. 
+
+- The mean structure can specify a main effect for trial type, but the main effects for condition and block-order, and all interaction effects, will always be generated as null effects. 
+- The SD structure can also be specified (can differ between trial types but not condition or block-order). 
+- The correlation matrix can also be specified (within subjects only, so correlations between the trial types). 
+
+```{r}
+
+generate_data <- function(n_iterations, 
+                          n_participants, 
+                          means = c(0,0,0,0), # must be a numeric vector with four elements
+                          sds = c(1,1,1,1), # must be a numeric vector with four elements
+                          r = 0) # must be either a single numeric (average correlation used for all elements) or a 4X4 matrix specifying the correlations among the trial-types
+  {
+  
+  require(dplyr)
+  require(tidyr)
+  require(faux)
+  
+  iterations_vector <- seq(1:n_iterations)
+  
+  simulated_data <- 
+    lapply(
+      seq_along(iterations_vector), 
+      function(i, ...){
+        faux::rnorm_multi(n = n_participants,
+                          mu = means,
+                          sd = sds,
+                          r = r,
+                          varnames = c("tt1", "tt2", "tt3", "tt4"),
+                          empirical = FALSE) |>
+          rownames_to_column(var = "participant") |>
+          mutate(group = ifelse(as.numeric(participant) %% 2 > 0, "intervention", "control"), 
+                 block_order = ifelse(as.numeric(participant) %% 4 %in% c(1,2), "block a first", "block b first")) |>
+          # convert to long format
+          gather(trial_type, D_score, c(tt1, tt2, tt3, tt4)) |>
+          mutate(D_score = round(D_score, 2),
+                 iteration = iterations_vector[[i]])
+      },
+    ) |>
+    dplyr::bind_rows() |>
+    mutate(participant = as.factor(participant), 
+           trial_type = as.factor(trial_type), 
+           group = as.factor(group), 
+           block_order = as.factor(block_order),
+           n_participants = n_participants,
+           means = paste(means, collapse = ", "),
+           sds = paste(sds, collapse = ", "),
+           r = paste(r, collapse = ", "))
+  
+  simulated_data_nested <- simulated_data |>
+    group_by(n_participants, iteration, means, sds, r) |>
+    nest() |>
+    ungroup()
+  
+  return(simulated_data_nested)
+}
+
+```
+
+## Processing and analysis strategies
+
+### 4X2 RM-ANOVA - main effect for trial-type (only) using 4 trial-types
+
+- Processing: None.
+- Model: 4 (within: trial-type) X 2 (between: group) RM-ANOVA. 
+- Inference method: If the p value for the main effect of trial-type is significant, make a H1 decision. 
+
+```{r}
+
+analysis_rmanova_4trialtypes_maineffecttt <- function(data){
+  # dependencies
+  require(broom)
+  require(ez)
+  
+  # fit anova
+  fit <- 
+    ezANOVA(data     = data,
+            dv       = D_score,
+            within   = trial_type,
+            between  = group,
+            wid      = participant,
+            type     = 3,
+            detailed = FALSE)
+  
+  result <- fit$ANOVA |>
+    filter(Effect == "trial_type") |>
+    pull(p) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### 4X2 RM-ANOVA comparing groups using 4 trial-types
+
+- Processing: None.
+- Analysis: 4 (within: trial-type) X 2 (between: group) RM-ANOVA.
+- Inference method: If any of the p values are significant (either main effect or the interaction), make a H1 decision. No alpha control/corrections.
+
+```{r}
+
+analysis_rmanova_4trialtypes <- function(data){
+  # dependencies
+  require(broom)
+  require(ez)
+  
+  # fit anova
+  fit <- 
+    ezANOVA(data     = data,
+            dv       = D_score,
+            within   = trial_type,
+            between  = group,
+            wid      = participant,
+            type     = 3,
+            detailed = FALSE)
+  
+  result <- fit$ANOVA |>
+    # extract p values
+    pull(p) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### 4X2 RM-ANOVA comparing groups using 1 averaged trial-type
+
+- Processing: Average the four trial-types before analysis.
+- Analysis: 2-way (between: group) ANOVA.
+- Inference method: If the p value is significant (main effect for group), make a H1 decision. 
+
+```{r}
+
+analysis_anova_1trialtype <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # combine trial-types
+    group_by(participant, group, block_order) |>
+    summarize(D_score = mean(D_score), .groups = "keep") |>
+    ungroup() |>
+    # fit anova
+    aov(D_score ~ group, 
+        data = _) |>
+    # tidy output
+    broom::tidy() |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### 4X2X2 RM-ANOVA
+
+*NB other degrees of freedom not simulated, e.g., the follow up t-tests or trial-type combinations*
+
+- Processing: None.
+- Analysis: 4 (within: trial-type) X 2 (between: group) X 2 (between: block-order) RM-ANOVA.
+- Inference method: If any of the p values are significant (any main effect or interaction), make a H1 decision. No alpha control/corrections.
+
+```{r}
+
+analysis_rmanova_4trialtypes_blockorder <- function(data){
+  # dependencies
+  require(broom)
+  require(ez)
+  
+  # fit anova
+  fit <- 
+    ezANOVA(data     = data,
+            dv       = D_score,
+            within   = trial_type,
+            between  = .(group, block_order),
+            wid      = participant,
+            type     = 3,
+            detailed = FALSE)
+  
+  result <- fit$ANOVA |>
+    # extract p values
+    pull(p) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### Independent t-tests between groups, using four trial types 
+
+- Processing: None.
+- Analysis: Four independent t-tests applied to each trial-type comparing between the groups. 
+- Inference method: If the p value for any t-test is significant, make a H1 decision. No alpha control/corrections.
+
+```{r}
+
+analysis_indepttests_4trialtypes <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # fit t tests to each trial-type between groups
+    group_by(trial_type) |>
+    do(broom::tidy(t.test(D_score ~ group, var.equal = TRUE, data = .))) |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### Independent t-tests between groups, using one averaged trial-type
+
+- Processing: Average the four trial-types before analysis.
+- Analysis: One independent t-test applied to the trial-type comparing between the groups. 
+- Inference method: If the p value for the t-test is significant, make a H1 decision. 
+
+```{r}
+
+analysis_indepttests_1trialtype <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # combine trial-types
+    group_by(participant, group, block_order) |>
+    summarize(D_score = mean(D_score), .groups = "keep") |>
+    ungroup() |>
+    # fit t tests between groups
+    do(broom::tidy(t.test(D_score ~ group, var.equal = TRUE, data = .))) |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### Independent t-tests between groups, by block order, using four trial types 
+
+```{r}
+
+analysis_indepttests_4trialtypes_blockorder <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # fit t tests to each trial-type between groups
+    group_by(trial_type, block_order) |>
+    do(broom::tidy(t.test(D_score ~ group, var.equal = TRUE, data = .))) |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### One-sample t-tests for each group and trial type, using four trial types
+
+- Processing: None.
+- Analysis: Eight one-sample t-tests applied to each group's trial-type comparing against the zero-point (*D* score = 0).
+- Inference method: If the p value for any t-test is significant, make a H1 decision.
+
+```{r}
+
+analysis_onesampttests_4trialtypes <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # fit t tests to each trial-type between groups
+    group_by(group, trial_type) %>%
+    do(broom::tidy(t.test(D_score ~ 1, var.equal = TRUE, data = .))) |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### One-sample t-tests for each group, trial type, and block order, using four trial types
+
+- Processing: None.
+- Analysis: Sixteen one-sample t-tests applied to each group's and block-order's trial-types comparing against the zero-point (*D* score = 0).
+- Inference method: If the p value for any t-test is significant, make a H1 decision.
+
+```{r}
+
+analysis_onesampttests_4trialtypes_blockorder <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # fit t tests to each trial-type between groups
+    group_by(group, trial_type, block_order) %>%
+    do(broom::tidy(t.test(D_score ~ 1, var.equal = TRUE, data = .))) |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+### One-sample t-tests for each group and block order, using one averaged trial-type
+
+- Processing: Average the four trial-types before analysis.
+- Analysis: Eight one-sample t-tests applied to each group's trial-type comparing against the zero-point (*D* score = 0).
+- Inference method: If the p value for any t-test is significant, make a H1 decision.
+
+```{r}
+
+analysis_onesampttests_1trialtype <- function(data){
+  # dependencies
+  require(broom)
+  
+  result <- data |>
+    # combine trial-types
+    group_by(participant, group, block_order) |>
+    summarize(D_score = mean(D_score), .groups = "keep") |>
+    ungroup() |>
+    # fit t tests to each trial-type between groups
+    group_by(group) %>%
+    do(broom::tidy(t.test(D_score ~ 1, var.equal = TRUE, data = .))) |>
+    # extract p values
+    pull(p.value) |>
+    # assess if at least one is significant
+    min(na.rm = TRUE) < 0.05
+  
+  return(as.logical(result))
+}
+
+```
+
+# Simulations
+
+## Descriptions of simulated conditions
+
+Simulations explore two different experimenter degrees of freedom non interactively. To do them interactively would provide an overwhelming number of simulations. FPR is already shown to be unacceptably high, making them redundant.
+
+```{r}
+
+descriptions <- tibble(
+  simulation = c(1,2,3,
+                 #4,5,6, # dropped as infrequently encountered scenarios
+                 7,8,9,10,11,12,13,14,15,16,17,18),
+  description = c(
+    "4 (trial-type) X 2 (group) RM ANOVA.",
+    "4 (trial-type) X 2 (group) RM ANOVA with follow-up between groups t-tests.",
+    "4 (trial-type) X 2 (group) RM ANOVA with follow-up between groups t-tests and one-sample t-tests to assess differences from zero.",
+    "D scores averaged across all trial-types, 2 (group) between-groups t-test.",
+    "D scores averaged across all trial-types, 2 (group) between-groups t-test with one-sample t-tests to assess differences from zero.",
+    
+    "4 (trial-type) X 2 (group) x 2 (block order) RM ANOVA.",
+    "4 (trial-type) X 2 (group) x 2 (block order) RM ANOVA with follow-up between groups t-tests.",
+    "4 (trial-type) X 2 (group) x 2 (block order) RM ANOVA with follow-up between groups t-tests and one-sample t-tests to assess differences from zero.",
+    
+    "Selectively reporting best analyses from simulations 1, 4, or 7: main test + decision about whether to average D scores across trial-types based on what provides a significant result.",
+    "Selectively reporting best analyses from simulations 2, 5, or 7: main test + follow-up t-tests + decision about whether to average D scores across trial-types based on what provides a significant result.",
+    "Selectively reporting best analyses from simulations 3 or 8: main test + follow-up t-tests + significance from zero t-tests + decision about whether to average D scores across trial-types or not based on what provides a significant result.",
+    "Selectively reporting best analyses from simulations 1 or 9: RM-ANOVA with decision about whether to include an additional covariate (block order) based on what provides a significant result.",
+    "Selectively reporting best analyses from simulations 3 or 10: RM-ANOVA + followup tests with decision about whether to include an additional covariate (block order) based on what provides a significant result.",
+    "Selectively reporting best analyses from simulations 3 or 11: RM-ANOVA + followup tests + difference from zero tests with decision about whether to include an additional covariate (block order) based on what provides a significant result.",
+    "Selectively reporting best analyses from simulations 3, 6, 7 or 11: RM-ANOVA + followup tests + difference from zero tests with decision about whether to include an additional covariate (block order) or whether to average D scores across trial-types based on what provides a significant result.")
+)
+
+descriptions |>
+  kable() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+```
+
+## Population main effect for trial-type is real, all other population effects are null/zero 
+
+### Quantify architypal IRAP dataset 
+
+Weighted average of mean and SD *D* score by trial type across domains, weighted average correlation between each trial type across domains, average sample size.
+
+```{r}
+
+# get data
+input_data <- read_csv("../data/data_scored_trimmed.csv")
+
+# more precise option is to do a meta analysis model 
+data_reshaped <- input_data |>
+  dplyr::select(unique_id, domain, D_tt1, D_tt2, D_tt3, D_tt4) |>
+  gather(trial_type, D, c(D_tt1, D_tt2, D_tt3, D_tt4))
+
+# n by domain
+ns <- data_reshaped |>
+  count(domain) 
+
+# calculate weighted average (by N) of the mean and SD D score for each trial-type and domain, averaged across domains
+means_and_sds <- data_reshaped |>
+  group_by(domain, trial_type) |>
+  summarize(mean = mean(D),
+            sd = sd(D),
+            .groups = "drop") |>
+  left_join(ns, by = "domain") |>
+  group_by(trial_type) |>
+  summarize(weighted_mean_mean = weighted.mean(mean, w = n),
+            weighted_mean_sd = weighted.mean(sd, w = n),
+            .groups = "drop") |> 
+  round_df(2)
+
+# calculate weighted average (by N) of the correlation between the trial-types within each domain, averaged across domains
+cor_df <- data_reshaped |>
+  pivot_wider(names_from = trial_type, 
+              values_from  = D) |>
+  group_by(domain) |>
+  summarize(tt1_tt2 = cor(D_tt1, D_tt2),
+            tt1_tt3 = cor(D_tt1, D_tt3),
+            tt1_tt4 = cor(D_tt1, D_tt4),
+            tt2_tt3 = cor(D_tt2, D_tt3),
+            tt2_tt4 = cor(D_tt2, D_tt4),
+            tt3_tt4 = cor(D_tt3, D_tt4)) |>
+  pivot_longer(cols = -domain,
+               names_to = "trial_types",
+               values_to = "r") |>
+  left_join(ns, by = "domain") |>
+  group_by(trial_types) |>
+  summarize(w_mean_r = weighted.mean(r, w = n),
+            .groups = "drop")
+
+# convert to matrix
+correlations_matrix <- 
+  matrix(c(                 1, cor_df$w_mean_r[1], cor_df$w_mean_r[2], cor_df$w_mean_r[3], 
+           cor_df$w_mean_r[1],                  1, cor_df$w_mean_r[4], cor_df$w_mean_r[5],
+           cor_df$w_mean_r[2], cor_df$w_mean_r[4],                  1, cor_df$w_mean_r[6],  
+           cor_df$w_mean_r[3], cor_df$w_mean_r[5], cor_df$w_mean_r[6],                 1),
+         nrow = 4, 
+         ncol = 4, 
+         byrow = TRUE) |>
+  round(2)
+
+```
+
+### Run simulations
+
+```{r}
+
+# sure directly exists
+dir.create("results")
+
+set.seed(42)
+
+# long runtime, so save to disk and reload if possible
+if(!file.exists("results/simulation_results_genericpattern.rds")){
+  
+  # data generation
+  simulated_data_genericpattern <-
+    bind_rows(
+      # true null population effects
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 20),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 40),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 60),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 80),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 500),
+      # generic pattern population effects
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 20, 
+                    means          = means_and_sds$weighted_mean_mean,
+                    sds            = means_and_sds$weighted_mean_sd,
+                    r              = correlations_matrix),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 40, 
+                    means          = means_and_sds$weighted_mean_mean,
+                    sds            = means_and_sds$weighted_mean_sd,
+                    r              = correlations_matrix),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 60, 
+                    means          = means_and_sds$weighted_mean_mean,
+                    sds            = means_and_sds$weighted_mean_sd,
+                    r              = correlations_matrix),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 80, 
+                    means          = means_and_sds$weighted_mean_mean,
+                    sds            = means_and_sds$weighted_mean_sd,
+                    r              = correlations_matrix),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 500, 
+                    means          = means_and_sds$weighted_mean_mean,
+                    sds            = means_and_sds$weighted_mean_sd,
+                    r              = correlations_matrix),
+    ) |>
+    # ez::ezANOVA converts from tbl_df to data frame. to speed up sims, do this once here
+    as.data.frame()
+
+  
+  # fit analyses to data 
+  simulation_results_genericpattern <- simulated_data_genericpattern |> 
+    mutate(
+      results_rmanova_4trialtypes_maineffecttt = 
+        future_map(data, 
+                   analysis_rmanova_4trialtypes_maineffecttt, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical()
+    )
+  
+  write_rds(simulation_results_genericpattern, "results/simulation_results_genericpattern.rds", compress = "gz")
+  
+} else {
+  simulation_results_genericpattern <- read_rds("results/simulation_results_genericpattern.rds") 
+}
+
+
+# create joint decisions based on combinations of individual analyses
+# calculate FPR for different combinations of analyses
+simulation_results_genericpattern_fpr <- simulation_results_genericpattern |>
+  dplyr::select(-iteration, -data) |>
+  rowwise() |>
+  mutate(
+    simulation_0 = as.logical(results_rmanova_4trialtypes_maineffecttt)
+  ) |>
+  ungroup() |>
+  pivot_longer(cols = c(-n_participants, -means, -sds, -r),
+               names_to = "analysis", 
+               values_to = "result") |>
+  group_by(n_participants, means, sds, r, analysis) |>
+  summarize(fpr_estimate = mean(result),
+            fpr_se = plotrix::std.error(result),
+            fpr_ci_lower = fpr_estimate - fpr_se*1.96,
+            fpr_ci_upper = fpr_estimate + fpr_se*1.96)
+
+write_csv(simulation_results_genericpattern_fpr, "results/simulation_results_genericpattern_fpr.csv")
+# simulation_results_genericpattern_fpr <- read_csv("results/simulation_results_genericpattern_fpr.csv")
+
+```
+
+### Inspect individual simulation results and Monte Carlo errors
+
+```{r}
+
+simulation_results_genericpattern_fpr |>
+  round_df(2) |>
+  kable() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+```
+
+### Summarize results
+
+```{r fig.height=6, fig.width=9}
+
+# summary table
+simulation_results_genericpattern_fpr_table <- simulation_results_genericpattern_fpr |>
+  select(-fpr_se,
+         -fpr_ci_lower,
+         -fpr_ci_upper) |>
+  pivot_wider(names_from = analysis,
+              values_from = fpr_estimate)
+  
+simulation_results_genericpattern_fpr_table |>
+  select(n_participants, means, sds, r, 
+         simulation_0) |>
+  kable() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+
+# summary plot of simulation results
+simulation_results_genericpattern_fpr_plot <- simulation_results_genericpattern_fpr |>
+  filter(analysis %in% c("simulation_0")) |>
+  mutate(n_participants = as.factor(n_participants),
+         n_participants = fct_rev(n_participants),
+         analysis = dplyr::case_match(analysis,
+                                      "simulation_0" ~ "4(w) X 2(b) RM-ANOVA\n(testing main effect for trial-type)"),
+         analysis = fct_rev(analysis))
+
+p1a <- simulation_results_genericpattern_fpr_plot |>
+  filter(means == c("0, 0, 0, 0")) |>
+  ggplot(aes(fpr_estimate, analysis, color = n_participants)) +
+  geom_vline(xintercept = 0.05, linetype = "dashed") +
+  geom_linerangeh(aes(xmin = fpr_ci_lower, xmax = fpr_ci_upper), position = position_dodge(width = 0.6)) +
+  geom_point(position = position_dodge(width = 0.6)) +
+  scale_color_viridis_d(begin = 0.3, end = 0.8, option = "mako", guide = guide_legend(reverse=TRUE)) +
+  theme_linedraw() +
+  xlab("False Positive Rate") +
+  ylab("") +
+  labs(color = "N participants") +
+  scale_x_continuous(labels = scales::percent_format(scale = 100), breaks = c(0.00, .05, .25, .50, .75, 1.00)) +
+  coord_cartesian(xlim = c(0, 1)) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(size = 11, face = "bold"),
+        legend.position = "none") +
+  ggtitle("Population effects simulated:\n    - All null")
+
+p1b <- simulation_results_genericpattern_fpr_plot |>
+  filter(means != c("0, 0, 0, 0")) |>
+  ggplot(aes(fpr_estimate, analysis, color = n_participants)) +
+  geom_vline(xintercept = 0.05, linetype = "dashed") +
+  geom_linerangeh(aes(xmin = fpr_ci_lower, xmax = fpr_ci_upper), position = position_dodge(width = 0.6)) +
+  geom_point(position = position_dodge(width = 0.6)) +
+  scale_color_viridis_d(begin = 0.3, end = 0.8, option = "mako", guide = guide_legend(reverse=TRUE)) +
+  theme_linedraw() +
+  xlab("True Positive Rate (Power)") +
+  ylab("") +
+  labs(color = "N participants") +
+  scale_x_continuous(labels = scales::percent_format(scale = 100), breaks = c(0.00, .05, .25, .50, .75, 1.00)) +
+  coord_cartesian(xlim = c(0, 1)) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(size = 11, face = "bold")) +
+  ggtitle("Population effects simulated:\n    - Generic pattern (true main effect for trial-type)\n    - All others null")
+
+
+library(patchwork)
+p1 <- p1a + p1b + plot_layout(ncol = 1)
+
+p1
+
+
+dir.create("../plots/")
+
+ggsave("../plots/p1.pdf",
+       plot = p1,
+       device = "pdf",
+       width = 9,
+       height = 4,
+       units = "in")
+
+```
+
+### TODO ??
+
+```{r eval=FALSE, include=FALSE}
+
+simulation_fpr_reshaped <- simulation_fpr |>
+  mutate(label = paste("fpr_n", n_participants, ifelse(means == "0, 0, 0, 0", "null", "generic_pattern"), sep = "_")) |>
+  select(label,
+         simulation_1, simulation_2, simulation_3, 
+         # simulation_4, simulation_5, simulation_6, 
+         simulation_7, simulation_8, 
+         simulation_9, simulation_10, simulation_11, simulation_12, 
+         simulation_13, simulation_14, simulation_15, simulation_16, 
+         simulation_17, simulation_18) |>
+  t() |>
+  as.data.frame() |>
+  janitor::row_to_names(row = 1)
+
+summary_empty <- read_excel("results/simulation_fpr_summary_empty.xlsx", sheet = "empty", skip = 1)
+
+# needs fixing
+summary_filled <- summary_empty |>
+  mutate(fpr_n_20_null = simulation_fpr_reshaped$fpr_n_20_null,
+         fpr_n_40_null = simulation_fpr_reshaped$fpr_n_40_null,
+         fpr_n_60_null = simulation_fpr_reshaped$fpr_n_60_null,
+         fpr_n_80_null = simulation_fpr_reshaped$fpr_n_80_null,
+         fpr_n_500_null = simulation_fpr_reshaped$fpr_n_500_null,
+         fpr_n_40_generic_pattern = simulation_fpr_reshaped$fpr_n_40_generic_pattern)
+
+write_csv(summary_filled, "results/simulation_fpr_summary_filled.csv")
+
+```
+
+## All population effects are null/zero
+
+### Run simulations
+
+```{r}
+
+# sure directly exists
+dir.create("results")
+
+set.seed(42)
+
+# long run time, so save to disk and reload if possible
+if(!file.exists("results/simulation_results_null.rds")){
+  
+  # data generation
+  simulated_data_null <-
+    bind_rows(
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 20),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 40),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 60),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 80),
+      generate_data(n_iterations   = n_iterations, 
+                    n_participants = 500)
+    ) |>
+    # ez::ezANOVA converts from tbl_df to data frame. to speed up sims, do this once here
+    as.data.frame()
+  
+  
+  # fit analyses to data 
+  simulation_results_null <- simulated_data_null |> 
+    mutate(
+      results_rmanova_4trialtypes = 
+        future_map(data, 
+                   analysis_rmanova_4trialtypes, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_indepttests_4trialtypes =
+        future_map(data,
+                   analysis_indepttests_4trialtypes,
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_onesampttests_4trialtypes = 
+        future_map(data, 
+                   analysis_onesampttests_4trialtypes, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_indepttests_1trialtype = 
+        future_map(data, 
+                   analysis_indepttests_1trialtype, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_onesampttests_1trialtype = 
+        future_map(data, 
+                   analysis_onesampttests_1trialtype, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_rmanova_4trialtypes_blockorder = 
+        future_map(data, 
+                   analysis_rmanova_4trialtypes_blockorder, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_indepttests_4trialtypes_blockorder = 
+        future_map(data, 
+                   analysis_indepttests_4trialtypes_blockorder, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical(),
+      
+      results_onesampttests_4trialtypes_blockorder = 
+        future_map(data, 
+                   analysis_onesampttests_4trialtypes_blockorder, 
+                   .progress = TRUE,
+                   .options = furrr_options(seed = TRUE)) |>
+        as.logical()
+    )
+
+  write_rds(simulation_results_null, "results/simulation_results_null.rds", compress = "gz")
+  
+} else {
+  simulation_results_null <- read_rds("results/simulation_results_null.rds") 
+}
+
+# create joint decisions based on combinations of individual analyses
+# calculate FPR for different combinations of analyses
+simulation_results_null_fpr <- simulation_results_null |>
+  dplyr::select(-iteration, -data) |>
+  rowwise() |>
+  mutate(
+    # 4 trial-types, between groups, with increasing followup tests
+    simulation_1 = as.logical(results_rmanova_4trialtypes), 
+    simulation_2 = as.logical(max(results_rmanova_4trialtypes,  
+                                  results_indepttests_4trialtypes)),
+    simulation_3 = as.logical(max(results_rmanova_4trialtypes,  
+                                  results_indepttests_4trialtypes,
+                                  results_onesampttests_4trialtypes)),
+    
+    # sims 4-6 dropped as they simulated situations no longer commonly encountered
+
+    # 1 D score, between groups, with increasing followup tests
+    simulation_7 = as.logical(results_indepttests_1trialtype),
+    simulation_8 = as.logical(max(results_indepttests_1trialtype,  
+                                  results_onesampttests_1trialtype)),
+    
+    # 4 trial-types, between groups and additional covariate, no followup tests b/c too many permutations
+    simulation_9  = as.logical(results_rmanova_4trialtypes_blockorder),
+    simulation_10 = as.logical(max(results_rmanova_4trialtypes_blockorder,
+                                   results_indepttests_4trialtypes_blockorder)),
+    simulation_11 = as.logical(max(results_rmanova_4trialtypes_blockorder,  
+                                   results_indepttests_4trialtypes_blockorder,
+                                   results_onesampttests_4trialtypes_blockorder))
+  ) |>
+  mutate(
+    # EDoF: optionally collapsing trial-types
+    simulation_12 = as.logical(max(simulation_1, 
+                                   simulation_7)), # no followups
+    
+    # EDoF: optionally collapsing trial-types & followup tests
+    simulation_13 = as.logical(max(simulation_2, 
+                                   simulation_7)), # between groups ttests
+    simulation_14 = as.logical(max(simulation_3, 
+                                   simulation_8)), # between groups and diff from zero ttests
+    
+    # EDoF: optional additional covariate
+    simulation_15 = as.logical(max(simulation_1, simulation_9)),
+    # followup tests + EDoF: optional additional covariate
+    simulation_16 = as.logical(max(simulation_2, simulation_10)),
+    # followup tests and diff from zero tests + EDoF: optional additional covariate
+    simulation_17 = as.logical(max(simulation_3, simulation_11)),
+    # followup tests and diff from zero tests + EDoF: in EITHER covariate or collapsing tts
+    simulation_18 = as.logical(max(simulation_3, 
+                                   simulation_8, 
+                                   simulation_11)) 
+  ) |>
+  ungroup() |>
+  pivot_longer(cols = c(-n_participants, -means, -sds, -r),
+               names_to = "analysis", 
+               values_to = "result") |>
+  group_by(n_participants, means, sds, r, analysis) |>
+  summarize(fpr_estimate = mean(result),
+            fpr_se = plotrix::std.error(result),
+            fpr_ci_lower = fpr_estimate - fpr_se*1.96,
+            fpr_ci_upper = fpr_estimate + fpr_se*1.96)
+
+write_csv(simulation_results_null_fpr, "results/simulation_results_null_fpr.csv")
+# simulation_results_null_fpr <- read_csv("results/simulation_results_null_fpr.csv")
+
+```
+
+### Inspect individual simulation results and Monte Carlo errors
+
+```{r}
+
+simulation_results_null_fpr |>
+  round_df(2) |>
+  kable() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+```
+
+### Summarize results
+
+Representing gradually worsening alpha control and then p hacking.
+
+```{r fig.height=4, fig.width=9}
+
+# summary table of analytic strategies
+tibble(analysis = c("Analytic strategy 1", 
+                    "Analytic strategy 2", 
+                    "Analytic strategy 3", 
+                    "Analytic strategy 4", 
+                    "Analytic strategy 5", 
+                    "Analytic strategy 6"),
+       description = c("Base analysis: 4 (within: trial-type) X 2 (between: group) RM-ANOVA",
+                       "+ Alpha inflation (also run follow-up between groups t-tests, without alpha control)",
+                       "+ More alpha inflation (also run one-sample t-tests to assess differences from zero, without alpha control)",
+                       "+ Analytic flexibility & selective reporting A (data processing: scoring data as one trial-type or four)", 
+                       "+ Analytic flexibility & selective reporting B (analysis: optionally including block-order as a covariate)",
+                       "+ Analytic flexibility & selective reporting A & B (scoring & covariate)")) |>
+  kable() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+
+# summary table
+simulation_results_null_fpr_table <- simulation_results_null_fpr |>
+  select(-fpr_se,
+         -fpr_ci_lower,
+         -fpr_ci_upper) |>
+  pivot_wider(names_from = analysis,
+              values_from = fpr_estimate) |>
+  select(n_participants, means, sds, r,
+         analytic_strategy_1 = simulation_1, 
+         analytic_strategy_2 = simulation_2, 
+         analytic_strategy_3 = simulation_3, 
+         analytic_strategy_4 = simulation_14, 
+         analytic_strategy_5 = simulation_17, 
+         analytic_strategy_6 = simulation_18)
+
+simulation_results_null_fpr_table |>
+  kable() |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+
+# summary plot of simulation results
+simulation_results_null_fpr_plot <- simulation_results_null_fpr |>
+  filter(analysis %in% c("simulation_1", "simulation_2", "simulation_3", 
+                         "simulation_14", "simulation_17", "simulation_18")) |>
+  mutate(n_participants = as.factor(n_participants),
+         n_participants = fct_rev(n_participants),
+         analysis = dplyr::case_match(analysis,
+                                      "simulation_1" ~ "(1) 4(w) X 2(b) RM-ANOVA \nwith hidden multiplicity", 
+                                      "simulation_2" ~ "(2) + between groups t-tests", 
+                                      "simulation_3" ~ "(3) + one-sample t-tests", 
+                                      "simulation_14" ~ "(4) + data processing flexibility", 
+                                      "simulation_17" ~ "(5) + covariate flexibility", 
+                                      "simulation_18" ~ "(6) + both data processing \n& covariate flexibility"),
+         analysis = fct_rev(analysis))
+
+p2 <- ggplot(simulation_results_null_fpr_plot, aes(fpr_estimate, analysis, color = n_participants)) +
+  geom_vline(xintercept = 0.05, linetype = "dashed") +
+  geom_linerangeh(aes(xmin = fpr_ci_lower, xmax = fpr_ci_upper), position = position_dodge(width = 0.6)) +
+  geom_point(position = position_dodge(width = 0.6)) +
+  scale_color_viridis_d(begin = 0.3, end = 0.8, option = "mako", guide = guide_legend(reverse=TRUE)) +
+  theme_linedraw() +
+  xlab("False Positive Rate") +
+  ylab("Analytic strategy") +
+  labs(color = "N participants") +
+  scale_x_continuous(labels = scales::percent_format(scale = 100), breaks = c(0.00, .05, .25, .50, .75, 1.00)) +
+  coord_cartesian(xlim = c(0, 1)) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(size = 11, face = "bold")) +
+  ggtitle("Population effects simulated: All null")
+
+p2
+
+
+dir.create("../plots/")
+
+ggsave("../plots/p2.pdf",
+       plot = p2,
+       device = "pdf",
+       width = 9,
+       height = 4,
+       units = "in")
+
+```
+
+- FPR is very weakly related to sample size. Much larger samples (e.g., 500) are not a cure-all.
+
+### TODO ??
+
+```{r eval=FALSE, include=FALSE}
+
+simulation_fpr_reshaped <- simulation_fpr |>
+  mutate(label = paste("fpr_n", n_participants, ifelse(means == "0, 0, 0, 0", "null", "generic_pattern"), sep = "_")) |>
+  select(label,
+         simulation_1, simulation_2, simulation_3, 
+         simulation_7, simulation_8, 
+         simulation_9, simulation_10, simulation_11, simulation_12, 
+         simulation_13, simulation_14, simulation_15, simulation_16, 
+         simulation_17, simulation_18) |>
+  t() |>
+  as.data.frame() |>
+  janitor::row_to_names(row = 1)
+
+summary_empty <- read_excel("results/simulation_fpr_summary_empty.xlsx", sheet = "empty", skip = 1)
+
+# needs fixing
+summary_filled <- summary_empty |>
+  mutate(fpr_n_20_null = simulation_fpr_reshaped$fpr_n_20_null,
+         fpr_n_40_null = simulation_fpr_reshaped$fpr_n_40_null,
+         fpr_n_60_null = simulation_fpr_reshaped$fpr_n_60_null,
+         fpr_n_80_null = simulation_fpr_reshaped$fpr_n_80_null,
+         fpr_n_500_null = simulation_fpr_reshaped$fpr_n_500_null,
+         fpr_n_40_generic_pattern = simulation_fpr_reshaped$fpr_n_40_generic_pattern)
+
+write_csv(summary_filled, "results/simulation_fpr_summary_filled.csv")
+
+```
+
+# TODO scrap
+
+Notes: 
+
+- sim 2 could involves no selective reporting, just doing what previous IRAP studies have often done, and indeed is a conservative version of this as it doesn't employ significance from zero t tests. If some of these analyses were not included, they might plausibly be requested by reviewers given how often they're reported. Inflated FPR is due to research area's failure to appreciate hidden multiplicity and need for alpha corrections. 
+- sim 3 is sim 2 + significance from zero tests. similar to sim 2, it represents modal research practices in the IRAP literature. 
+- sim 14 demonstrates how this worsens if there is an EDoF around whether to average D scores within participant. It is often not possible to know post hoc whether authors of a given paper exploited these EDoF (i.e., if they reported only one they may or may not have run the others).
+- sim 17 demonstrates how this worsens if there is an EDoF around whether to also include block order in the ANOVA. It is often not possible to know post hoc whether authors of a given paper exploited these EDoF (i.e., if they reported only one they may or may not have run the others).
+
+
+```{r eval=FALSE, fig.height=5, fig.width=13, include=FALSE}
+
+# simulation_results_fpr |>
+#   filter(analysis %in% c("simulation_1", "simulation_2", "simulation_3",
+#                          "simulation_14", "simulation_17", "simulation_18")) |>
+#   mutate(generic_pattern = ifelse(means == c("0, 0, 0, 0"), "Assume no generic pattern exists & confounds results", "Assume generic pattern confound exists"),
+#          n_participants = as.factor(n_participants),
+#          n_participants = fct_rev(n_participants),
+#          analysis = dplyr::case_match(analysis,
+#                                       "simulation_1" ~ "(1) RM-ANOVA with hidden multiplicity",
+#                                       "simulation_2" ~ "(2) + between groups t-tests",
+#                                       "simulation_3" ~ "(3) + one-sample t-tests",
+#                                       "simulation_14" ~ "(4) + data processing choice",
+#                                       "simulation_17" ~ "(5) + covariate choice",
+#                                       "simulation_18" ~ "(6) + both data processing and covariate choices"),
+#          analysis = fct_rev(analysis)) |>
+#   ggplot(aes(fpr_estimate, analysis, color = n_participants)) +
+#   geom_vline(xintercept = 0.05, linetype = "dashed") +
+#   geom_linerangeh(aes(xmin = fpr_ci_lower, xmax = fpr_ci_upper), position = position_dodge(width = 0.6)) +
+#   geom_point(position = position_dodge(width = 0.6)) +
+#   scale_color_viridis_d(begin = 0.3, end = 0.8, option = "mako", guide = guide_legend(reverse=TRUE)) +
+#   theme_linedraw() +
+#   xlab("False Positive Rate") +
+#   ylab("Analytic strategy") +
+#   labs(color = "N participants") +
+#   scale_x_continuous(labels = scales::percent_format(scale = 100), breaks = c(0.00, .05, .25, .50, .75, 1.00)) +
+#   coord_cartesian(xlim = c(0, 1)) +
+#   theme(panel.grid.minor = element_blank()) +
+#   facet_wrap(~ generic_pattern, ncol = 2)
+
+
+
+# ## generic pattern effect + others all true null
+# simulation_results_fpr |>
+#   filter(analysis %in% c("simulation_1", "simulation_2", "simulation_3",
+#                          "simulation_14", "simulation_17", "simulation_18"),
+#          means != c("0, 0, 0, 0")) |>
+#   mutate(n_participants = as.factor(n_participants),
+#          n_participants = fct_rev(n_participants),
+#          analysis = dplyr::case_match(analysis,
+#                                       "simulation_1" ~ "(1) RM-ANOVA with hidden multiplicity",
+#                                       "simulation_2" ~ "(2) + between groups t-tests",
+#                                       "simulation_3" ~ "(3) + one-sample t-tests",
+#                                       "simulation_14" ~ "(4) + data processing choice",
+#                                       "simulation_17" ~ "(5) + covariate choice",
+#                                       "simulation_18" ~ "(6) + both data processing and covariate choices"),
+#          analysis = fct_rev(analysis)) |>
+#   ggplot(aes(fpr_estimate, analysis, color = n_participants)) +
+#   geom_vline(xintercept = 0.05, linetype = "dashed") +
+#   geom_linerangeh(aes(xmin = fpr_ci_lower, xmax = fpr_ci_upper), position = position_dodge(width = 0.6)) +
+#   geom_point(position = position_dodge(width = 0.6)) +
+#   scale_color_viridis_d(begin = 0.3, end = 0.8, option = "mako", guide = guide_legend(reverse=TRUE)) +
+#   theme_linedraw() +
+#   xlab("False Positive Rate") +
+#   ylab("Analytic strategy") +
+#   labs(color = "N participants") +
+#   scale_x_continuous(labels = scales::percent_format(scale = 100), breaks = c(0.00, .05, .25, .50, .75, 1.00)) +
+#   coord_cartesian(xlim = c(0, 1)) +
+#   theme(panel.grid.minor = element_blank(),
+#         plot.title = element_text(size = 11, face = "bold")) +
+#   ggtitle("True population effects simulated:\n    - Generic pattern between trial-types (confounds results)\n    - All other effects null")
+
+```
+
+
