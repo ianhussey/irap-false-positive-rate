@@ -2,3 +2,6 @@
 
 
 
+## TODO
+
+Change "with hidden multiplicity" to "testing all effects"?
